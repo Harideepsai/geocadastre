@@ -5,8 +5,8 @@ interface SecurityGateOverlayProps {
   onUnlock: () => void;
 }
 
-const AUTHORIZED_USERNAME = '25eg112a35@anurag.edu.in';
-const AUTHORIZED_PASSWORD = 'Instacks@2029';
+const AUTHORIZED_USERNAME = '26011';
+const AUTHORIZED_PASSWORD = '26011';
 const MAX_ATTEMPTS = 15;
 const RATE_LIMIT_WINDOW_MS = 60 * 1000; // 60 seconds
 const LOCKOUT_DURATION_MS = 60 * 1000; // 60 seconds lockout
