@@ -36,7 +36,22 @@ import {
   Cpu,
   Bot,
   Layers as LayersIcon,
+  Navigation,
+  Camera,
+  Crosshair,
 } from 'lucide-react';
+import {
+  parsePointCloudFile,
+  generateSampleCadastralLiDAR,
+  ParsedPointCloud,
+} from '../utils/pointCloudParser';
+import {
+  processDroneSurveyPhotos,
+  generateDroneSurveyMission,
+  PhotogrammetryReconstructionResult,
+} from '../utils/dronePhotogrammetry';
+import { PointCloudPreviewCanvas } from './PointCloudPreviewCanvas';
+import { DroneFlightPreviewCanvas } from './DroneFlightPreviewCanvas';
 
 interface ModelIngestionModalProps {
   isOpen: boolean;
@@ -95,6 +110,13 @@ export const ModelIngestionModal: React.FC<ModelIngestionModalProps> = ({
   // Method 4: LiDAR Point Cloud & Survey Sensors State
   const [pointCloudFile, setPointCloudFile] = useState<File | null>(null);
   const [pointCloudPoints, setPointCloudPoints] = useState<number>(142500);
+  const [parsedPointCloud, setParsedPointCloud] = useState<ParsedPointCloud | null>(null);
+  const [isParsingLidar, setIsParsingLidar] = useState(false);
+
+  // Method 5: Drone Photogrammetry & UAV Mission State
+  const [droneFiles, setDroneFiles] = useState<File[]>([]);
+  const [droneMission, setDroneMission] = useState<PhotogrammetryReconstructionResult | null>(null);
+  const [isProcessingDrone, setIsProcessingDrone] = useState(false);
 
   // Survey-Grade GNSS / CORS Station Metadata
   const [gnssFixType, setGnssFixType] = useState<'RTK_FIXED' | 'DGPS' | 'FLOAT' | 'STANDALONE'>('RTK_FIXED');
@@ -167,6 +189,110 @@ export const ModelIngestionModal: React.FC<ModelIngestionModalProps> = ({
       const file = e.target.files[0];
       setModelFile(file);
     }
+  };
+
+  // Point Cloud Upload & Binary Parsing (ASPRS LAS 1.2-1.4 / PLY / XYZ)
+  const handlePointCloudUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files[0]) {
+      const file = e.target.files[0];
+      setPointCloudFile(file);
+      setIsParsingLidar(true);
+      setStatusMessage(`Parsing binary point cloud: ${file.name}...`);
+      try {
+        const parsed = await parsePointCloudFile(file);
+        setParsedPointCloud(parsed);
+        setPointCloudPoints(parsed.totalPoints);
+        if (parsed.demAmsl && parsed.dsmAmsl) {
+          setDemAmsl(parsed.demAmsl);
+          setDsmAmsl(parsed.dsmAmsl);
+        }
+        setStatusMessage(
+          `LiDAR parsed: ${parsed.totalPoints.toLocaleString()} points (${parsed.dimensions.width}m × ${parsed.dimensions.length}m, Δh=${parsed.dimensions.height}m)`
+        );
+      } catch (err: any) {
+        console.warn('LiDAR parse warning:', err);
+        setStatusMessage(`Error parsing point cloud: ${err.message || 'Check LAS format'}`);
+      } finally {
+        setIsParsingLidar(false);
+      }
+    }
+  };
+
+  // Load High-Fidelity Demo Cadastral LiDAR Scan
+  const handleLoadSampleLidar = () => {
+    setIsParsingLidar(true);
+    setStatusMessage('Generating calibrated ASPRS LiDAR point cloud for Malkajgiri Survey No. 3127...');
+    setTimeout(() => {
+      const sample = generateSampleCadastralLiDAR(
+        buildingWidth || 16.5,
+        buildingLength || 14.2,
+        totalFloors || 4,
+        demAmsl || 512.4
+      );
+      setParsedPointCloud(sample);
+      setPointCloudPoints(sample.totalPoints);
+      setDemAmsl(sample.demAmsl);
+      setDsmAmsl(sample.dsmAmsl);
+      setPointCloudFile(new File(['dummy'], sample.fileName, { type: 'application/octet-stream' }));
+      setIsParsingLidar(false);
+      setStatusMessage(`Loaded demo LiDAR scan: ${sample.totalPoints.toLocaleString()} points (Ground DEM + Building Envelope + Foliage)`);
+    }, 400);
+  };
+
+  // Auto-Calibrate Cadastre Dimensions from LiDAR Point Cloud
+  const handleApplyLidarCalibration = () => {
+    if (!parsedPointCloud) return;
+    setBuildingWidth(parsedPointCloud.dimensions.width);
+    setBuildingLength(parsedPointCloud.dimensions.length);
+    const estFloors = Math.max(1, Math.round(parsedPointCloud.dimensions.height / floorHeight));
+    setTotalFloors(estFloors);
+    setPlotArea(Math.round(parsedPointCloud.dimensions.width * parsedPointCloud.dimensions.length * 1.6));
+    setDemAmsl(parsedPointCloud.demAmsl);
+    setDsmAmsl(parsedPointCloud.dsmAmsl);
+    setStatusMessage(
+      `Calibrated parcel envelope from LiDAR bounds: ${parsedPointCloud.dimensions.width}m × ${parsedPointCloud.dimensions.length}m × ${parsedPointCloud.dimensions.height}m (${estFloors} storeys)`
+    );
+  };
+
+  // Process Drone Survey Photos & Structure-from-Motion (SfM)
+  const handleDronePhotosUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files.length > 0) {
+      const files = Array.from(e.target.files);
+      setDroneFiles(files);
+      await runDronePhotogrammetry(files);
+    }
+  };
+
+  const runDronePhotogrammetry = async (files?: File[]) => {
+    setIsProcessingDrone(true);
+    setStatusMessage('Triangulating multi-view camera stations & bundle adjustment...');
+    try {
+      const result = await processDroneSurveyPhotos(files || droneFiles, activeCoords.lat, activeCoords.lng, demAmsl);
+      setDroneMission(result);
+      setStatusMessage(
+        `UAV Photogrammetry aligned: ${result.alignedImages} camera stations, GSD ${result.gsdCmPerPixel} cm/px (RMSE ${result.reprojectionErrorPx}px)`
+      );
+    } catch (err: any) {
+      console.warn('Drone processing warning:', err);
+      setStatusMessage('Drone reconstruction error, applying calibrated survey mission.');
+      const fallback = generateDroneSurveyMission(activeCoords.lat, activeCoords.lng, demAmsl);
+      setDroneMission(fallback);
+    } finally {
+      setIsProcessingDrone(false);
+    }
+  };
+
+  const handleApplyDroneCalibration = () => {
+    if (!droneMission) return;
+    setBuildingWidth(droneMission.calibratedFootprint.width);
+    setBuildingLength(droneMission.calibratedFootprint.length);
+    setTotalFloors(droneMission.calibratedFootprint.estimatedFloors);
+    setPlotArea(droneMission.calibratedFootprint.plotArea);
+    setDemAmsl(droneMission.calibratedFootprint.groundElevationDem);
+    setDsmAmsl(droneMission.calibratedFootprint.roofPeakDsm);
+    setStatusMessage(
+      `Applied calibrated footprint from UAV photogrammetry: ${droneMission.calibratedFootprint.width}m × ${droneMission.calibratedFootprint.length}m`
+    );
   };
 
   // Generates 3D extruded geometry from floor footprint and packages as GLB binary
@@ -282,7 +408,24 @@ export const ModelIngestionModal: React.FC<ModelIngestionModalProps> = ({
         subMeshStrategy,
         pointCloudFile,
         pointCloudFileName: pointCloudFile?.name,
-        pointCloudPoints,
+        pointCloudPoints: parsedPointCloud ? parsedPointCloud.totalPoints : pointCloudPoints,
+        pointCloudData: parsedPointCloud?.samplePoints,
+        droneSurveyMetadata: droneMission
+          ? {
+              flightAltitudeMeters: droneMission.flightAltitudeAgl,
+              totalImages: droneMission.totalImages,
+              gsdCmPerPixel: droneMission.gsdCmPerPixel,
+              reprojectionErrorPx: droneMission.reprojectionErrorPx,
+              cameraModel: droneMission.cameraModel,
+              flightWaypoints: droneMission.cameraStations.map((s) => ({
+                x: s.x,
+                y: s.y,
+                z: s.altitudeAgl,
+                lat: s.latitude,
+                lng: s.longitude,
+              })),
+            }
+          : undefined,
         gnssMetadata: {
           fix_type: gnssFixType,
           horizontal_precision_meters: horizontalPrecision,
@@ -467,7 +610,7 @@ export const ModelIngestionModal: React.FC<ModelIngestionModalProps> = ({
                   <span className="w-5 h-5 rounded-full bg-[#1e3a8a] text-white flex items-center justify-center text-[10px]">3</span>
                   <span>Select 3D Ingestion Workflow:</span>
                 </label>
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
+                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2">
                   {/* Method 1: 2D Blueprint */}
                   <button
                     type="button"
@@ -485,9 +628,9 @@ export const ModelIngestionModal: React.FC<ModelIngestionModalProps> = ({
                       {selectedMethod === 'blueprint_2d' && <CheckCircle2 className="w-3.5 h-3.5 text-[#1e3a8a]" />}
                     </div>
                     <div>
-                      <div className="font-bold text-slate-900 text-xs">Method 1: Blueprint 2D</div>
+                      <div className="font-bold text-slate-900 text-xs">Method 1: Blueprint</div>
                       <div className="text-[10px] text-slate-500 mt-0.5 leading-snug">
-                        AI extrusion from architectural floor plan
+                        AI extrusion from plan
                       </div>
                     </div>
                   </button>
@@ -509,9 +652,9 @@ export const ModelIngestionModal: React.FC<ModelIngestionModalProps> = ({
                       {selectedMethod === 'direct_3d_glb' && <CheckCircle2 className="w-3.5 h-3.5 text-[#1e3a8a]" />}
                     </div>
                     <div>
-                      <div className="font-bold text-slate-900 text-xs">Method 2: 3D Asset (.glb)</div>
+                      <div className="font-bold text-slate-900 text-xs">Method 2: 3D (.glb)</div>
                       <div className="text-[10px] text-slate-500 mt-0.5 leading-snug">
-                        BIM / CAD upload with sub-mesh parsing
+                        BIM / CAD sub-meshes
                       </div>
                     </div>
                   </button>
@@ -533,20 +676,20 @@ export const ModelIngestionModal: React.FC<ModelIngestionModalProps> = ({
                       {selectedMethod === 'parametric_builder' && <CheckCircle2 className="w-3.5 h-3.5 text-[#1e3a8a]" />}
                     </div>
                     <div>
-                      <div className="font-bold text-slate-900 text-xs">Method 3: Parametric</div>
+                      <div className="font-bold text-slate-900 text-xs">Method 3: Voxels</div>
                       <div className="text-[10px] text-slate-500 mt-0.5 leading-snug">
-                        Multi-floor voxels & volumetric cadastre
+                        Volumetric cadastre
                       </div>
                     </div>
                   </button>
 
-                  {/* Method 4: LiDAR & GNSS */}
+                  {/* Method 4: LiDAR Point Cloud */}
                   <button
                     type="button"
                     onClick={() => setSelectedMethod('point_cloud_lidar')}
                     className={`p-2.5 rounded-xl border text-left flex flex-col gap-1.5 transition-all cursor-pointer ${
                       selectedMethod === 'point_cloud_lidar'
-                        ? 'bg-blue-50/80 border-[#1e3a8a] shadow-xs ring-1 ring-[#1e3a8a]'
+                        ? 'bg-emerald-50/90 border-emerald-600 shadow-xs ring-1 ring-emerald-600'
                         : 'bg-slate-50 border-slate-200 hover:border-slate-300'
                     }`}
                   >
@@ -558,10 +701,36 @@ export const ModelIngestionModal: React.FC<ModelIngestionModalProps> = ({
                     </div>
                     <div>
                       <div className="font-bold text-slate-900 text-xs flex items-center gap-1">
-                        <span>Method 4: LiDAR / GNSS</span>
+                        <span>Method 4: LiDAR</span>
                       </div>
                       <div className="text-[10px] text-slate-500 mt-0.5 leading-snug">
-                        CORS RTK & DEM/DSM point cloud
+                        ASPRS .las point cloud & DEM
+                      </div>
+                    </div>
+                  </button>
+
+                  {/* Method 5: Drone UAV Photogrammetry */}
+                  <button
+                    type="button"
+                    onClick={() => setSelectedMethod('drone_photogrammetry')}
+                    className={`p-2.5 rounded-xl border text-left flex flex-col gap-1.5 transition-all cursor-pointer ${
+                      selectedMethod === 'drone_photogrammetry'
+                        ? 'bg-indigo-50/90 border-indigo-600 shadow-xs ring-1 ring-indigo-600'
+                        : 'bg-slate-50 border-slate-200 hover:border-slate-300'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <div className="w-6 h-6 rounded-lg bg-indigo-100 text-indigo-800 flex items-center justify-center">
+                        <Navigation className="w-3.5 h-3.5 rotate-45" />
+                      </div>
+                      {selectedMethod === 'drone_photogrammetry' && <CheckCircle2 className="w-3.5 h-3.5 text-indigo-700" />}
+                    </div>
+                    <div>
+                      <div className="font-bold text-slate-900 text-xs flex items-center gap-1">
+                        <span>Method 5: Drone UAV</span>
+                      </div>
+                      <div className="text-[10px] text-slate-500 mt-0.5 leading-snug">
+                        Aerial SfM & Orthophoto
                       </div>
                     </div>
                   </button>
@@ -767,66 +936,111 @@ export const ModelIngestionModal: React.FC<ModelIngestionModalProps> = ({
                     <div className="flex items-center justify-between">
                       <div className="font-semibold text-emerald-800 flex items-center gap-1.5 font-mono text-xs">
                         <Radar className="w-4 h-4 text-emerald-700" />
-                        <span>LiDAR Point Cloud (.las / .laz) & Survey Metadata</span>
+                        <span>Direct LiDAR Point Cloud Parser (.las / .laz / .ply)</span>
                       </div>
-                      <span className="text-[10px] text-slate-500 font-mono">ASPRS LAS v1.4 / EGM2008 Datum</span>
+                      <span className="text-[10px] text-slate-500 font-mono">ASPRS LAS v1.2-1.4 / EGM2008 Datum</span>
                     </div>
 
-                    {/* Point Cloud File Dropper */}
-                    <div className="border-2 border-dashed border-emerald-300 hover:border-emerald-500 rounded-xl p-4 text-center cursor-pointer transition-all bg-white">
-                      <input
-                        type="file"
-                        accept=".las,.laz,.ply,.e57"
-                        onChange={(e) => {
-                          if (e.target.files && e.target.files[0]) {
-                            setPointCloudFile(e.target.files[0]);
-                          }
-                        }}
-                        className="hidden"
-                        id="pointcloud-upload-input"
-                      />
-                      <label htmlFor="pointcloud-upload-input" className="cursor-pointer block">
-                        {pointCloudFile ? (
-                          <div className="flex items-center gap-3 text-left">
-                            <div className="w-12 h-12 rounded-xl bg-emerald-100 border border-emerald-200 flex items-center justify-center text-emerald-800">
-                              <Radar className="w-6 h-6" />
-                            </div>
-                            <div>
-                              <div className="font-bold text-slate-900">{pointCloudFile.name}</div>
-                              <div className="text-[11px] text-slate-500 font-mono">
-                                {(pointCloudFile.size / (1024 * 1024)).toFixed(2)} MB &bull; {pointCloudPoints.toLocaleString()} points parsed
+                    {/* Point Cloud File Dropper & Quick Load Bar */}
+                    <div className="flex flex-col sm:flex-row gap-2">
+                      <div className="flex-1 border-2 border-dashed border-emerald-300 hover:border-emerald-500 rounded-xl p-3 text-center cursor-pointer transition-all bg-white">
+                        <input
+                          type="file"
+                          accept=".las,.laz,.ply,.xyz,.txt"
+                          onChange={handlePointCloudUpload}
+                          className="hidden"
+                          id="pointcloud-upload-input"
+                        />
+                        <label htmlFor="pointcloud-upload-input" className="cursor-pointer block">
+                          {pointCloudFile ? (
+                            <div className="flex items-center gap-3 text-left">
+                              <div className="w-10 h-10 rounded-lg bg-emerald-100 border border-emerald-200 flex items-center justify-center text-emerald-800">
+                                <Radar className="w-5 h-5" />
+                              </div>
+                              <div>
+                                <div className="font-bold text-slate-900 text-xs truncate max-w-[200px]">{pointCloudFile.name}</div>
+                                <div className="text-[10px] text-slate-500 font-mono">
+                                  {(pointCloudFile.size / (1024 * 1024)).toFixed(2)} MB &bull; {pointCloudPoints.toLocaleString()} points parsed
+                                </div>
                               </div>
                             </div>
-                          </div>
-                        ) : (
-                          <div className="py-2.5 space-y-1">
-                            <Radar className="w-7 h-7 text-emerald-700 mx-auto opacity-80" />
-                            <div className="font-medium text-slate-700 text-xs">
-                              Drop aerial / mobile LiDAR <span className="text-emerald-700 font-mono font-bold">.las</span> or <span className="text-emerald-700 font-mono font-bold">.laz</span> file
+                          ) : (
+                            <div className="py-1 space-y-0.5">
+                              <Radar className="w-5 h-5 text-emerald-700 mx-auto opacity-80" />
+                              <div className="font-medium text-slate-700 text-xs">
+                                Drop <span className="text-emerald-700 font-mono font-bold">.las</span>, <span className="text-emerald-700 font-mono font-bold">.laz</span>, or <span className="text-emerald-700 font-mono font-bold">.ply</span> file
+                              </div>
+                              <div className="text-[9px] text-slate-400 font-mono">
+                                Direct in-browser ASPRS binary parsing
+                              </div>
                             </div>
-                            <div className="text-[10px] text-slate-500 font-mono">
-                              Point cloud classes: ASPRS Class 2 (Ground), Class 6 (Building), Class 5 (High Veg)
-                            </div>
-                          </div>
-                        )}
-                      </label>
+                          )}
+                        </label>
+                      </div>
+
+                      {/* Quick Load Sample LiDAR Button */}
+                      <button
+                        type="button"
+                        onClick={handleLoadSampleLidar}
+                        disabled={isParsingLidar}
+                        className="sm:w-48 px-3 py-2 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 text-emerald-800 rounded-xl text-xs font-mono font-semibold flex flex-col items-center justify-center gap-1 cursor-pointer transition-all disabled:opacity-50"
+                      >
+                        <div className="flex items-center gap-1">
+                          <Sparkles className="w-3.5 h-3.5 text-emerald-600" />
+                          <span>Load Demo LiDAR</span>
+                        </div>
+                        <span className="text-[9px] text-emerald-600 font-normal">Survey 3127 (4-Storey)</span>
+                      </button>
                     </div>
 
-                    {/* Classification Breakdown & AI Segmentation Button */}
-                    <div className="grid grid-cols-3 gap-2 bg-slate-100 p-2.5 rounded-lg text-[11px]">
-                      <div className="bg-white p-2 rounded border border-slate-200 text-center">
-                        <div className="text-[10px] text-slate-500">Ground Returns</div>
-                        <div className="font-bold text-slate-800 font-mono">64,125 pts (45%)</div>
+                    {/* Interactive 3D Point Cloud WebGL Canvas */}
+                    <div className="space-y-1">
+                      <div className="flex items-center justify-between text-[11px] font-mono text-slate-600">
+                        <span className="flex items-center gap-1 font-bold text-emerald-900">
+                          <Eye className="w-3.5 h-3.5 text-emerald-700" />
+                          <span>Live 3D Point Cloud Inspection:</span>
+                        </span>
+                        <span>{parsedPointCloud ? `${parsedPointCloud.totalPoints.toLocaleString()} points` : 'Ready to parse'}</span>
                       </div>
-                      <div className="bg-white p-2 rounded border border-slate-200 text-center">
-                        <div className="text-[10px] text-slate-500">Building Returns</div>
-                        <div className="font-bold text-emerald-700 font-mono">59,850 pts (42%)</div>
-                      </div>
-                      <div className="bg-white p-2 rounded border border-slate-200 text-center">
-                        <div className="text-[10px] text-slate-500">Vegetation</div>
-                        <div className="font-bold text-amber-700 font-mono">18,525 pts (13%)</div>
-                      </div>
+                      <PointCloudPreviewCanvas pointCloud={parsedPointCloud} className="h-48 w-full" />
                     </div>
+
+                    {/* Extracted LiDAR Metrics & Auto-Calibrate Action */}
+                    {parsedPointCloud && (
+                      <div className="bg-emerald-50/80 border border-emerald-200 rounded-xl p-3 space-y-2 text-[11px] font-mono">
+                        <div className="flex items-center justify-between font-bold text-emerald-900 text-xs">
+                          <span className="flex items-center gap-1.5">
+                            <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                            <span>ASPRS LiDAR Extracted Dimensions:</span>
+                          </span>
+                          <button
+                            type="button"
+                            onClick={handleApplyLidarCalibration}
+                            className="px-2 py-1 rounded bg-emerald-700 hover:bg-emerald-800 text-white font-mono text-[10px] cursor-pointer shadow-xs transition-all"
+                          >
+                            Auto-Calibrate Cadastre
+                          </button>
+                        </div>
+                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-1 border-t border-emerald-200 text-slate-700">
+                          <div>
+                            <span className="block text-[10px] text-slate-500">Envelope Size:</span>
+                            <strong className="text-emerald-950 font-bold">{parsedPointCloud.dimensions.width}m × {parsedPointCloud.dimensions.length}m</strong>
+                          </div>
+                          <div>
+                            <span className="block text-[10px] text-slate-500">Extracted Height:</span>
+                            <strong className="text-emerald-950 font-bold">{parsedPointCloud.dimensions.height}m (Δh)</strong>
+                          </div>
+                          <div>
+                            <span className="block text-[10px] text-slate-500">Ground DEM:</span>
+                            <strong className="text-emerald-950 font-bold">{parsedPointCloud.demAmsl}m AMSL</strong>
+                          </div>
+                          <div>
+                            <span className="block text-[10px] text-slate-500">Roof DSM:</span>
+                            <strong className="text-emerald-950 font-bold">{parsedPointCloud.dsmAmsl}m AMSL</strong>
+                          </div>
+                        </div>
+                      </div>
+                    )}
 
                     {/* Survey-grade GNSS / CORS Station Metadata */}
                     <div className="bg-white border border-slate-200 rounded-xl p-3 space-y-2.5">
@@ -870,25 +1084,6 @@ export const ModelIngestionModal: React.FC<ModelIngestionModalProps> = ({
                             className="w-full bg-slate-50 border border-slate-200 rounded p-1 font-mono text-xs"
                           />
                         </div>
-                        <div>
-                          <label className="text-slate-600 block text-[10px] mb-0.5">Antenna Height (m):</label>
-                          <input
-                            type="number"
-                            step={0.05}
-                            value={antennaHeight}
-                            onChange={(e) => setAntennaHeight(parseFloat(e.target.value) || 1.8)}
-                            className="w-full bg-slate-50 border border-slate-200 rounded p-1 font-mono text-xs"
-                          />
-                        </div>
-                        <div className="sm:col-span-2">
-                          <label className="text-slate-600 block text-[10px] mb-0.5">Geoid Model / Datum:</label>
-                          <input
-                            type="text"
-                            value={geoidModel}
-                            onChange={(e) => setGeoidModel(e.target.value)}
-                            className="w-full bg-slate-50 border border-slate-200 rounded p-1 font-mono text-xs"
-                          />
-                        </div>
                       </div>
                     </div>
 
@@ -927,26 +1122,121 @@ export const ModelIngestionModal: React.FC<ModelIngestionModalProps> = ({
                         </div>
                       </div>
                     </div>
+                  </div>
+                )}
 
-                    {/* AI Point Cloud Segmentation Button */}
-                    <button
-                      type="button"
-                      onClick={handleRunAiExtraction}
-                      disabled={isAiRunning}
-                      className="w-full py-2 bg-emerald-700 hover:bg-emerald-800 text-white rounded-lg font-medium text-xs flex items-center justify-center gap-1.5 cursor-pointer shadow-xs disabled:opacity-50"
-                    >
-                      {isAiRunning ? (
-                        <>
-                          <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                          <span>Extracting RANSAC / AI Building Footprint...</span>
-                        </>
-                      ) : (
-                        <>
-                          <Sparkles className="w-3.5 h-3.5" />
-                          <span>Filter Point Cloud & Auto-Fit 3D Envelope via Gemini AI</span>
-                        </>
-                      )}
-                    </button>
+                {/* METHOD 5: Drone UAV Photogrammetry & Structure-from-Motion (Module 5) */}
+                {selectedMethod === 'drone_photogrammetry' && (
+                  <div className="space-y-4">
+                    <div className="flex items-center justify-between">
+                      <div className="font-semibold text-indigo-800 flex items-center gap-1.5 font-mono text-xs">
+                        <Navigation className="w-4 h-4 text-indigo-700 rotate-45" />
+                        <span>Drone UAV Photogrammetry & Structure-from-Motion (SfM)</span>
+                      </div>
+                      <span className="text-[10px] text-slate-500 font-mono">Multi-View Bundle Adjustment</span>
+                    </div>
+
+                    {/* Drone Photos Dropper & Mission Trigger */}
+                    <div className="flex flex-col sm:flex-row gap-2">
+                      <div className="flex-1 border-2 border-dashed border-indigo-300 hover:border-indigo-500 rounded-xl p-3 text-center cursor-pointer transition-all bg-white">
+                        <input
+                          type="file"
+                          accept="image/*"
+                          multiple
+                          onChange={handleDronePhotosUpload}
+                          className="hidden"
+                          id="drone-photos-upload-input"
+                        />
+                        <label htmlFor="drone-photos-upload-input" className="cursor-pointer block">
+                          {droneFiles.length > 0 ? (
+                            <div className="flex items-center gap-3 text-left">
+                              <div className="w-10 h-10 rounded-lg bg-indigo-100 border border-indigo-200 flex items-center justify-center text-indigo-800">
+                                <Camera className="w-5 h-5" />
+                              </div>
+                              <div>
+                                <div className="font-bold text-slate-900 text-xs">{droneFiles.length} Drone Aerial Photos Selected</div>
+                                <div className="text-[10px] text-slate-500 font-mono">
+                                  Nadir & Oblique flight stations
+                                </div>
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="py-1 space-y-0.5">
+                              <Camera className="w-5 h-5 text-indigo-700 mx-auto opacity-80" />
+                              <div className="font-medium text-slate-700 text-xs">
+                                Drop UAV flight images (<span className="text-indigo-700 font-mono font-bold">.jpg / .tiff</span>)
+                              </div>
+                              <div className="text-[9px] text-slate-400 font-mono">
+                                Multi-view stereo triangulation
+                              </div>
+                            </div>
+                          )}
+                        </label>
+                      </div>
+
+                      {/* Load Sample Drone Mission Button */}
+                      <button
+                        type="button"
+                        onClick={() => runDronePhotogrammetry()}
+                        disabled={isProcessingDrone}
+                        className="sm:w-52 px-3 py-2 bg-indigo-50 hover:bg-indigo-100 border border-indigo-300 text-indigo-800 rounded-xl text-xs font-mono font-semibold flex flex-col items-center justify-center gap-1 cursor-pointer transition-all disabled:opacity-50"
+                      >
+                        <div className="flex items-center gap-1">
+                          <Navigation className="w-3.5 h-3.5 text-indigo-600 rotate-45" />
+                          <span>Load Drone Mission</span>
+                        </div>
+                        <span className="text-[9px] text-indigo-600 font-normal">8 Stations (Nadir + Oblique)</span>
+                      </button>
+                    </div>
+
+                    {/* Interactive 3D Drone Flight Path & Camera Frustums Canvas */}
+                    <div className="space-y-1">
+                      <div className="flex items-center justify-between text-[11px] font-mono text-slate-600">
+                        <span className="flex items-center gap-1 font-bold text-indigo-900">
+                          <Eye className="w-3.5 h-3.5 text-indigo-700" />
+                          <span>3D UAV Flight Path & Ray Cones:</span>
+                        </span>
+                        <span>{droneMission ? `${droneMission.alignedImages} camera stations aligned` : 'Ready to reconstruct'}</span>
+                      </div>
+                      <DroneFlightPreviewCanvas mission={droneMission} className="h-48 w-full" />
+                    </div>
+
+                    {/* Photogrammetric Telemetry & QA Card */}
+                    {droneMission && (
+                      <div className="bg-indigo-50/80 border border-indigo-200 rounded-xl p-3 space-y-2 text-[11px] font-mono">
+                        <div className="flex items-center justify-between font-bold text-indigo-900 text-xs">
+                          <span className="flex items-center gap-1.5">
+                            <CheckCircle2 className="w-4 h-4 text-indigo-600" />
+                            <span>Photogrammetric Triangulation Report:</span>
+                          </span>
+                          <button
+                            type="button"
+                            onClick={handleApplyDroneCalibration}
+                            className="px-2 py-1 rounded bg-indigo-700 hover:bg-indigo-800 text-white font-mono text-[10px] cursor-pointer shadow-xs transition-all"
+                          >
+                            Apply to Cadastre
+                          </button>
+                        </div>
+                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-1 border-t border-indigo-200 text-slate-700">
+                          <div>
+                            <span className="block text-[10px] text-slate-500">Ground Sampling (GSD):</span>
+                            <strong className="text-indigo-950 font-bold">{droneMission.gsdCmPerPixel} cm/px</strong>
+                          </div>
+                          <div>
+                            <span className="block text-[10px] text-slate-500">Reprojection Error:</span>
+                            <strong className="text-emerald-700 font-bold">{droneMission.reprojectionErrorPx} px (RMSE)</strong>
+                          </div>
+                          <div>
+                            <span className="block text-[10px] text-slate-500">Tie Points:</span>
+                            <strong className="text-indigo-950 font-bold">{droneMission.matchedTiePoints.toLocaleString()}</strong>
+                          </div>
+                          <div>
+                            <span className="block text-[10px] text-slate-500">Flight Altitude:</span>
+                            <strong className="text-indigo-950 font-bold">{droneMission.flightAltitudeAgl}m AGL</strong>
+                          </div>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
 

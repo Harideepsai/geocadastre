@@ -818,7 +818,7 @@ export class CadastreService {
             flat_number: u.flat_number,
             area: u.area,
             property_type: u.property_type || 'Residential Apartment',
-            record_reference: u.record_reference || (u as any).igrs_deed_reference || `DOC-${newBuilding.survey_number}-${u.flat_number}`,
+            record_reference: (u as any).record_reference || u.property_record_ref || (u as any).igrs_deed_reference || `DOC-${newBuilding.survey_number}-${u.flat_number}`,
           }));
           const { error: unitErr } = await client.from('property_units').insert(unitsMapped);
           if (unitErr) console.warn('❌ Supabase property_units insert error:', unitErr.message, unitErr.details);

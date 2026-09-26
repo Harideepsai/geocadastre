@@ -365,7 +365,7 @@ export interface SpatialLookupResult {
   undergroundAssets?: UndergroundAsset[];
 }
 
-export type IngestionMethod = 'blueprint_2d' | 'direct_3d_glb' | 'parametric_builder' | 'point_cloud_lidar';
+export type IngestionMethod = 'blueprint_2d' | 'direct_3d_glb' | 'parametric_builder' | 'point_cloud_lidar' | 'drone_photogrammetry';
 
 export interface IngestionPayload {
   method: IngestionMethod;
@@ -401,6 +401,8 @@ export interface IngestionPayload {
   // CORS GNSS & Terrain Elevation metadata
   gnssMetadata?: GnssMetadata;
   terrainElevation?: TerrainElevationModel;
+  // Method 5: Drone Photogrammetry specific
+  droneSurveyMetadata?: any;
   // Generated or uploaded GLB blob / URL
   generatedGlbBlob?: Blob | null;
   uploadedModelUrl?: string | null;
