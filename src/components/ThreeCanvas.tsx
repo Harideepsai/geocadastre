@@ -11,6 +11,7 @@ import {
 } from '../types';
 import { DEFAULT_UNDERGROUND_ASSETS } from '../services/clashDetector';
 import { createSafeWebGLRenderer, disposeSafeWebGLRenderer } from '../utils/webglUtils';
+import { createThreeShapeFromPolygon, getTriRadialYPolygon } from '../utils/blueprintProcessor';
 import {
   RotateCcw,
   Box,
@@ -528,7 +529,38 @@ export const ThreeCanvas: React.FC<ThreeCanvasProps> = ({
       );
     }
 
-    const bldEnvelopeGeo = new THREE.BoxGeometry(buildingWidth, totalHeight, buildingLength);
+    // Check if the current building has a complex 2D footprint polygon or archetype
+    const hasComplexPolygon = Boolean(
+      currentBuilding?.footprint_polygon && currentBuilding.footprint_polygon.length >= 3
+    );
+    const activeFootprintPolygon = hasComplexPolygon
+      ? currentBuilding!.footprint_polygon!
+      : currentBuilding?.shape_archetype === 'tri_radial_y'
+      ? getTriRadialYPolygon(buildingWidth, buildingLength).polygon
+      : null;
+    const activeCourtyardHoles = hasComplexPolygon
+      ? currentBuilding?.courtyard_holes
+      : currentBuilding?.shape_archetype === 'tri_radial_y'
+      ? getTriRadialYPolygon(buildingWidth, buildingLength).holes
+      : undefined;
+
+    let bldEnvelopeGeo: THREE.BufferGeometry;
+    let bldMeshY = totalHeight / 2;
+
+    if (activeFootprintPolygon && activeFootprintPolygon.length >= 3) {
+      const complexShape = createThreeShapeFromPolygon(activeFootprintPolygon, activeCourtyardHoles);
+      const extrudedEnvelope = new THREE.ExtrudeGeometry(complexShape, {
+        depth: totalHeight,
+        bevelEnabled: false,
+      });
+      extrudedEnvelope.rotateX(-Math.PI / 2);
+      bldEnvelopeGeo = extrudedEnvelope;
+      bldMeshY = 0;
+    } else {
+      bldEnvelopeGeo = new THREE.BoxGeometry(buildingWidth, totalHeight, buildingLength);
+      bldMeshY = totalHeight / 2;
+    }
+
     const bldEnvelopeMat = new THREE.MeshStandardMaterial({
       color: 0xf1f5f9,
       transparent: true,
@@ -539,7 +571,7 @@ export const ThreeCanvas: React.FC<ThreeCanvasProps> = ({
       depthWrite: false,
     });
     const bldMesh = new THREE.Mesh(bldEnvelopeGeo, bldEnvelopeMat);
-    bldMesh.position.set(0, totalHeight / 2, 0);
+    bldMesh.position.set(0, bldMeshY, 0);
     dynamicGroup.add(bldMesh);
 
     // Building Wireframe Skeleton
@@ -552,7 +584,7 @@ export const ThreeCanvas: React.FC<ThreeCanvasProps> = ({
         opacity: 0.4,
       })
     );
-    bldLine.position.set(0, totalHeight / 2, 0);
+    bldLine.position.set(0, bldMeshY, 0);
     dynamicGroup.add(bldLine);
 
     // 2. Floor Plates for all floors (including Sub-surface Basements if showUnderground)
@@ -762,7 +794,20 @@ export const ThreeCanvas: React.FC<ThreeCanvasProps> = ({
       const verticalShift = fl.floor_number * explodedOffset * 4.5;
 
       // Floor slab plate at bottom_height
-      const slabGeo = new THREE.BoxGeometry(buildingWidth - 0.3, 0.2, buildingLength - 0.3);
+      let slabGeo: THREE.BufferGeometry;
+      let slabPosY = fl.bottom_height + 0.1 + verticalShift;
+
+      if (activeFootprintPolygon && activeFootprintPolygon.length >= 3) {
+        const complexShape = createThreeShapeFromPolygon(activeFootprintPolygon, activeCourtyardHoles);
+        const extrudedSlab = new THREE.ExtrudeGeometry(complexShape, { depth: 0.2, bevelEnabled: false });
+        extrudedSlab.rotateX(-Math.PI / 2);
+        slabGeo = extrudedSlab;
+        slabPosY = fl.bottom_height + verticalShift;
+      } else {
+        slabGeo = new THREE.BoxGeometry(buildingWidth - 0.3, 0.2, buildingLength - 0.3);
+        slabPosY = fl.bottom_height + 0.1 + verticalShift;
+      }
+
       const slabMat = new THREE.MeshStandardMaterial({
         color: isCurrentUnitFloor ? 0x0284c7 : fl.floor_number === 0 ? 0x0ea5e9 : 0xe2e8f0,
         transparent: true,
@@ -771,7 +816,7 @@ export const ThreeCanvas: React.FC<ThreeCanvasProps> = ({
         depthWrite: false,
       });
       const slabMesh = new THREE.Mesh(slabGeo, slabMat);
-      slabMesh.position.set(0, fl.bottom_height + 0.1 + verticalShift, 0);
+      slabMesh.position.set(0, slabPosY, 0);
       dynamicGroup.add(slabMesh);
 
       // Floor boundary wireframe
@@ -784,27 +829,42 @@ export const ThreeCanvas: React.FC<ThreeCanvasProps> = ({
           opacity: 0.6,
         })
       );
-      slabLine.position.set(0, fl.bottom_height + 0.1 + verticalShift, 0);
+      slabLine.position.set(0, slabPosY, 0);
       dynamicGroup.add(slabLine);
 
-      // Center Core / Elevator / Staircase Shaft Outline
-      const coreGeo = new THREE.BoxGeometry(2.0, 3.0, 3.0);
-      const coreMat = new THREE.MeshStandardMaterial({
-        color: 0xcfd8dc,
-        transparent: true,
-        opacity: 0.2,
-        depthWrite: false,
-      });
-      const coreMesh = new THREE.Mesh(coreGeo, coreMat);
-      coreMesh.position.set(0, fl.bottom_height + 1.5 + verticalShift, 0);
-      dynamicGroup.add(coreMesh);
+      // Center Core / Elevator / Staircase Shaft Outline (only for rectangular buildings without built-in atrium)
+      if (!activeCourtyardHoles || activeCourtyardHoles.length === 0) {
+        const coreGeo = new THREE.BoxGeometry(2.0, 3.0, 3.0);
+        const coreMat = new THREE.MeshStandardMaterial({
+          color: 0xcfd8dc,
+          transparent: true,
+          opacity: 0.2,
+          depthWrite: false,
+        });
+        const coreMesh = new THREE.Mesh(coreGeo, coreMat);
+        coreMesh.position.set(0, fl.bottom_height + 1.5 + verticalShift, 0);
+        dynamicGroup.add(coreMesh);
+      }
     });
 
     // Top Roof Slab Plate (Enclosing the top floor)
     if (filterFloor === 'ALL' && floorsToRender.length > 0) {
       const topFloorNum = Math.max(...floorsToRender.map((f) => f.floor_number));
       const topExplodedShift = topFloorNum * explodedOffset * 4.5;
-      const roofSlabGeo = new THREE.BoxGeometry(buildingWidth - 0.3, 0.2, buildingLength - 0.3);
+      let roofSlabGeo: THREE.BufferGeometry;
+      let roofPosY = totalHeight + 0.1 + topExplodedShift;
+
+      if (activeFootprintPolygon && activeFootprintPolygon.length >= 3) {
+        const complexShape = createThreeShapeFromPolygon(activeFootprintPolygon, activeCourtyardHoles);
+        const extrudedRoof = new THREE.ExtrudeGeometry(complexShape, { depth: 0.25, bevelEnabled: false });
+        extrudedRoof.rotateX(-Math.PI / 2);
+        roofSlabGeo = extrudedRoof;
+        roofPosY = totalHeight + topExplodedShift;
+      } else {
+        roofSlabGeo = new THREE.BoxGeometry(buildingWidth - 0.3, 0.2, buildingLength - 0.3);
+        roofPosY = totalHeight + 0.1 + topExplodedShift;
+      }
+
       const roofSlabMat = new THREE.MeshStandardMaterial({
         color: 0xe2e8f0,
         transparent: true,
@@ -813,7 +873,7 @@ export const ThreeCanvas: React.FC<ThreeCanvasProps> = ({
         depthWrite: false,
       });
       const roofSlabMesh = new THREE.Mesh(roofSlabGeo, roofSlabMat);
-      roofSlabMesh.position.set(0, totalHeight + 0.1 + topExplodedShift, 0);
+      roofSlabMesh.position.set(0, roofPosY, 0);
       dynamicGroup.add(roofSlabMesh);
 
       const roofEdges = new THREE.EdgesGeometry(roofSlabGeo);
@@ -825,7 +885,7 @@ export const ThreeCanvas: React.FC<ThreeCanvasProps> = ({
           opacity: 0.5,
         })
       );
-      roofLine.position.set(0, totalHeight + 0.1 + topExplodedShift, 0);
+      roofLine.position.set(0, roofPosY, 0);
       dynamicGroup.add(roofLine);
     }
 

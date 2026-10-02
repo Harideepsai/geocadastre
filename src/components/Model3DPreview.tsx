@@ -3,6 +3,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { IngestionMethod } from '../types';
 import { createSafeWebGLRenderer, disposeSafeWebGLRenderer } from '../utils/webglUtils';
+import { Point2D, ShapeArchetype, createThreeShapeFromPolygon } from '../utils/blueprintProcessor';
 import {
   Box,
   Layers,
@@ -27,6 +28,9 @@ interface Model3DPreviewProps {
   blueprintPreviewUrl?: string | null;
   modelFile?: File | null;
   surveyNumber?: string;
+  footprintPolygon?: Point2D[];
+  courtyardHoles?: Point2D[][];
+  shapeArchetype?: ShapeArchetype;
 }
 
 export const Model3DPreview: React.FC<Model3DPreviewProps> = ({
@@ -39,6 +43,9 @@ export const Model3DPreview: React.FC<Model3DPreviewProps> = ({
   blueprintPreviewUrl,
   modelFile,
   surveyNumber = 'SY-397/2B',
+  footprintPolygon,
+  courtyardHoles,
+  shapeArchetype,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
@@ -318,6 +325,9 @@ export const Model3DPreview: React.FC<Model3DPreviewProps> = ({
     blueprintPreviewUrl,
     modelFile,
     shadingMode,
+    footprintPolygon,
+    courtyardHoles,
+    shapeArchetype,
   ]);
 
   // Helper to render parametric floors, strata units, and floor slabs
@@ -328,7 +338,118 @@ export const Model3DPreview: React.FC<Model3DPreviewProps> = ({
     // Unit Color Palette
     const unitColors = [0x38bdf8, 0x34d399, 0xfbbf24, 0x818cf8];
 
-    // Foundation Slab
+    // If Complex Blueprint Polygon is present, extrude the true architectural polygon
+    if (footprintPolygon && footprintPolygon.length >= 3) {
+      const complexShape = createThreeShapeFromPolygon(footprintPolygon, courtyardHoles);
+
+      // Foundation Slab
+      const foundationGeom = new THREE.ExtrudeGeometry(complexShape, {
+        depth: 0.35,
+        bevelEnabled: true,
+        bevelSegments: 2,
+        bevelSize: 0.08,
+        bevelThickness: 0.05,
+      });
+      foundationGeom.rotateX(-Math.PI / 2);
+      const foundationMat = new THREE.MeshStandardMaterial({
+        color: 0x64748b,
+        roughness: 0.8,
+      });
+      const foundationMesh = new THREE.Mesh(foundationGeom, foundationMat);
+      foundationMesh.position.y = 0.0;
+      foundationMesh.receiveShadow = true;
+      group.add(foundationMesh);
+
+      // If Blueprint 2D image preview is loaded, overlay it at ground level
+      if (method === 'blueprint_2d' && blueprintPreviewUrl) {
+        new THREE.TextureLoader().load(blueprintPreviewUrl, (texture) => {
+          const bpGeom = new THREE.PlaneGeometry(buildingWidth, buildingLength);
+          const bpMat = new THREE.MeshBasicMaterial({
+            map: texture,
+            transparent: true,
+            opacity: 0.85,
+          });
+          const bpMesh = new THREE.Mesh(bpGeom, bpMat);
+          bpMesh.rotation.x = -Math.PI / 2;
+          bpMesh.position.y = 0.36;
+          group.add(bpMesh);
+        });
+      }
+
+      // Generate each floor level using the complex extruded shape
+      for (let f = 0; f < totalFloors; f++) {
+        const floorBottom = 0.35 + f * floorHeight;
+        const unitHeight = Math.max(1.0, floorHeight - 0.25);
+
+        // Floor intermediate slab plate
+        const slabGeom = new THREE.ExtrudeGeometry(complexShape, { depth: 0.15, bevelEnabled: false });
+        slabGeom.rotateX(-Math.PI / 2);
+        const slabMat = new THREE.MeshStandardMaterial({
+          color: 0x94a3b8,
+          roughness: 0.6,
+        });
+        const slabMesh = new THREE.Mesh(slabGeom, slabMat);
+        slabMesh.position.y = floorBottom;
+        group.add(slabMesh);
+
+        // Extruded unit volume matching complex floor outline
+        const floorGeom = new THREE.ExtrudeGeometry(complexShape, { depth: unitHeight, bevelEnabled: false });
+        floorGeom.rotateX(-Math.PI / 2);
+        const color = unitColors[f % unitColors.length];
+        const unitMat = new THREE.MeshStandardMaterial({
+          color,
+          roughness: 0.35,
+          metalness: 0.15,
+          wireframe: isWireframe,
+          transparent: true,
+          opacity: isWireframe ? 0.8 : isXRay ? 0.38 : 0.82,
+        });
+        const floorMesh = new THREE.Mesh(floorGeom, unitMat);
+        floorMesh.position.y = floorBottom + 0.15;
+        floorMesh.castShadow = !isWireframe;
+        floorMesh.receiveShadow = true;
+        group.add(floorMesh);
+
+        // Clean CAD wireframe edges for the complex shape
+        if (!isWireframe) {
+          const edgesGeom = new THREE.EdgesGeometry(floorGeom);
+          const lineMat = new THREE.LineBasicMaterial({
+            color: 0x0f172a,
+            linewidth: 1,
+            transparent: true,
+            opacity: 0.45,
+          });
+          const wireframeLine = new THREE.LineSegments(edgesGeom, lineMat);
+          wireframeLine.position.y = floorBottom + 0.15;
+          group.add(wireframeLine);
+        }
+      }
+
+      // Roof Slab & Parapet
+      const roofY = 0.35 + totalFloors * floorHeight;
+      const roofGeom = new THREE.ExtrudeGeometry(complexShape, { depth: 0.25, bevelEnabled: false });
+      roofGeom.rotateX(-Math.PI / 2);
+      const roofMat = new THREE.MeshStandardMaterial({
+        color: 0x475569,
+        roughness: 0.7,
+      });
+      const roofMesh = new THREE.Mesh(roofGeom, roofMat);
+      roofMesh.position.y = roofY;
+      roofMesh.castShadow = true;
+      group.add(roofMesh);
+
+      const roofEdges = new THREE.EdgesGeometry(roofGeom);
+      const roofWire = new THREE.LineSegments(
+        roofEdges,
+        new THREE.LineBasicMaterial({ color: 0x1e3a8a, transparent: true, opacity: 0.6 })
+      );
+      roofWire.position.y = roofY;
+      group.add(roofWire);
+
+      return;
+    }
+
+    // Fallback: Standard Box Rectangular Geometry
     const foundationGeom = new THREE.BoxGeometry(buildingWidth + 1.2, 0.4, buildingLength + 1.2);
     const foundationMat = new THREE.MeshStandardMaterial({
       color: 0x64748b,
@@ -358,7 +479,6 @@ export const Model3DPreview: React.FC<Model3DPreviewProps> = ({
     // Generate each floor level
     for (let f = 0; f < totalFloors; f++) {
       const floorBottom = 0.4 + f * floorHeight;
-      const floorTop = floorBottom + floorHeight;
       const floorCenterY = floorBottom + floorHeight / 2;
 
       // Floor intermediate slab

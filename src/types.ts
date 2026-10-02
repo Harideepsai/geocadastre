@@ -98,6 +98,11 @@ export interface Building {
   gnss_metadata?: GnssMetadata;
   // Terrain DEM / DSM elevation
   terrain_elevation?: TerrainElevationModel;
+  // Complex Footprint & Floor Plan Geometry (SIH26011 2D to 3D Extrusion)
+  footprint_polygon?: Array<{ x: number; y: number }>;
+  courtyard_holes?: Array<Array<{ x: number; y: number }>>;
+  shape_archetype?: 'custom_cv' | 'tri_radial_y' | 'cruciform_x' | 'h_shape' | 'box_rectangular';
+  wing_polygons?: Array<{ wing_id: string; name: string; polygon: Array<{ x: number; y: number }> }>;
   created_at?: string;
   updated_at?: string;
 }
@@ -388,6 +393,11 @@ export interface IngestionPayload {
   // Method 1: 2D Blueprint specific
   blueprintImageFile?: File | null;
   blueprintImageUrl?: string;
+  blueprintImageBase64?: string;
+  footprintPolygon?: Array<{ x: number; y: number }>;
+  courtyardHoles?: Array<Array<{ x: number; y: number }>>;
+  shapeArchetype?: 'custom_cv' | 'tri_radial_y' | 'cruciform_x' | 'h_shape' | 'box_rectangular';
+  wingPolygons?: Array<{ wing_id: string; name: string; polygon: Array<{ x: number; y: number }> }>;
   // Method 2: Direct 3D Asset specific
   modelFile?: File | null;
   modelFileName?: string;

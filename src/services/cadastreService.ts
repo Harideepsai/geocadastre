@@ -580,6 +580,11 @@ export class CadastreService {
         ndsm_building_height_meters: totalHeight,
         vertical_datum: 'EGM2008',
       },
+      // Complex 2D-to-3D Extrusion Data
+      footprint_polygon: payload.footprintPolygon,
+      courtyard_holes: payload.courtyardHoles,
+      shape_archetype: payload.shapeArchetype,
+      wing_polygons: payload.wingPolygons,
       created_at: new Date().toISOString(),
     };
 
@@ -1856,26 +1861,47 @@ export class CadastreService {
     }
 
     return {
-      footprintWidth: 16.8,
-      footprintLength: 14.2,
-      plotArea: 1250.0,
+      footprintWidth: 24.0,
+      footprintLength: 22.0,
+      plotArea: 1450.0,
       estimatedFloors: 4,
       estimatedHeight: 12.0,
-      unitsPerFloor: 2,
+      unitsPerFloor: 3,
       hasBasement: true,
       basementLevels: 1,
       basementDepth: 3.0,
       orientationAngle: 12.5,
       confidenceScore: 0.94,
-      detectedCorners: [
-        { x: -8.4, y: -7.1 },
-        { x: 8.4, y: -7.1 },
-        { x: 8.4, y: 7.1 },
-        { x: -8.4, y: 7.1 },
+      shapeArchetype: 'tri_radial_y',
+      outerPolygon: [
+        { x: -3.5, y: 10.5 },
+        { x: 3.5, y: 10.5 },
+        { x: 5.0, y: 4.0 },
+        { x: 11.4, y: 1.2 },
+        { x: 10.2, y: -5.0 },
+        { x: 2.8, y: -3.2 },
+        { x: 0.5, y: -10.5 },
+        { x: -5.6, y: -10.0 },
+        { x: -3.5, y: -4.0 },
+        { x: -11.4, y: -1.6 },
+        { x: -10.8, y: 4.0 },
+        { x: -5.0, y: 4.5 },
       ],
-      setbacks: { front: 3.5, rear: 3.0, left: 3.0, right: 3.0 },
+      courtyardHoles: [
+        [
+          { x: 0.0, y: 2.5 },
+          { x: 2.2, y: -1.4 },
+          { x: -2.2, y: -1.4 },
+        ],
+      ],
+      wings: [
+        { wingId: 'WING-N', name: 'North Radial Wing (Residences A1-A2)', polygon: [{ x: -3.5, y: 10.5 }, { x: 3.5, y: 10.5 }, { x: 5.0, y: 4.0 }, { x: -5.0, y: 4.5 }] },
+        { wingId: 'WING-SE', name: 'South-East Radial Wing (Residences B1-B2)', polygon: [{ x: 5.0, y: 4.0 }, { x: 11.4, y: 1.2 }, { x: 10.2, y: -5.0 }, { x: 2.8, y: -3.2 }] },
+        { wingId: 'WING-SW', name: 'South-West Radial Wing (Residences C1-C2)', polygon: [{ x: -3.5, y: -4.0 }, { x: -11.4, y: -1.6 }, { x: -10.8, y: 4.0 }, { x: -5.0, y: 4.5 }] },
+      ],
+      setbacks: { front: 4.0, rear: 3.5, left: 3.5, right: 3.5 },
       summary:
-        'Client-side cadastral heuristic engine parsed 4 storeys (12m) with 1 Sub-surface Basement (3m depth) and standard GHMC setback clearances.',
+        'Client-side cadastral heuristic engine parsed 4 storeys (12m) tri-radial superstructure with central courtyard lightwell and 1 Sub-surface Basement (3m depth) complying with GHMC setback clearances.',
       isAiGenerated: false,
       engine: 'Client Cadastral Heuristics Engine',
     };

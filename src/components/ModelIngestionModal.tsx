@@ -13,6 +13,17 @@ import { ParcelMapPicker } from './ParcelMapPicker';
 import { Model3DPreview } from './Model3DPreview';
 import { ErrorBoundary } from './ErrorBoundary';
 import {
+  Point2D,
+  ShapeArchetype,
+  WingPartition,
+  traceBlueprintContour,
+  getTriRadialYPolygon,
+  getCruciformXPolygon,
+  getHShapePolygon,
+  getStandardBoxPolygon,
+  createThreeShapeFromPolygon,
+} from '../utils/blueprintProcessor';
+import {
   X,
   Upload,
   Layers,
@@ -102,6 +113,44 @@ export const ModelIngestionModal: React.FC<ModelIngestionModalProps> = ({
   // Method 1: Blueprint 2D State
   const [blueprintFile, setBlueprintFile] = useState<File | null>(null);
   const [blueprintPreviewUrl, setBlueprintPreviewUrl] = useState<string | null>(null);
+  const [blueprintBase64, setBlueprintBase64] = useState<string | null>(null);
+  const [isTracingContour, setIsTracingContour] = useState<boolean>(false);
+
+  // Complex Footprint Polygon & Archetype State (SIH26011 2D to 3D Extrusion)
+  const [footprintPolygon, setFootprintPolygon] = useState<Point2D[]>(() => getTriRadialYPolygon(24.0, 22.0).polygon);
+  const [courtyardHoles, setCourtyardHoles] = useState<Point2D[][]>(() => getTriRadialYPolygon(24.0, 22.0).holes);
+  const [shapeArchetype, setShapeArchetype] = useState<ShapeArchetype>('tri_radial_y');
+  const [wingPartitions, setWingPartitions] = useState<WingPartition[]>(() => getTriRadialYPolygon(24.0, 22.0).wings);
+
+  // Switch between architectural archetype presets (Image 1, Image 2, Image 3)
+  const handleApplyArchetype = (archetype: ShapeArchetype) => {
+    setShapeArchetype(archetype);
+    if (archetype === 'tri_radial_y') {
+      const res = getTriRadialYPolygon(buildingWidth || 24, buildingLength || 22);
+      setFootprintPolygon(res.polygon);
+      setCourtyardHoles(res.holes);
+      setWingPartitions(res.wings);
+      setStatusMessage('Applied Tri-Radial Y-Wing layout (Curved 3-wing complex with central triangular atrium).');
+    } else if (archetype === 'cruciform_x') {
+      const res = getCruciformXPolygon(buildingWidth || 22, buildingLength || 22);
+      setFootprintPolygon(res.polygon);
+      setCourtyardHoles(res.holes);
+      setWingPartitions(res.wings);
+      setStatusMessage('Applied Cruciform X-Wing layout (4 diagonal wings at 45° with central square atrium).');
+    } else if (archetype === 'h_shape') {
+      const res = getHShapePolygon(buildingWidth || 20, buildingLength || 18);
+      setFootprintPolygon(res.polygon);
+      setCourtyardHoles(res.holes);
+      setWingPartitions(res.wings);
+      setStatusMessage('Applied Symmetrical H-Shape layout (Dual wings with recessed lightwells & core shafts).');
+    } else if (archetype === 'box_rectangular') {
+      const res = getStandardBoxPolygon(buildingWidth || 16, buildingLength || 14);
+      setFootprintPolygon(res.polygon);
+      setCourtyardHoles(res.holes);
+      setWingPartitions(res.wings);
+      setStatusMessage('Applied Standard Rectangular Bounding Box.');
+    }
+  };
 
   // Method 2: Direct 3D Asset (.glb) State
   const [modelFile, setModelFile] = useState<File | null>(null);
@@ -143,12 +192,13 @@ export const ModelIngestionModal: React.FC<ModelIngestionModalProps> = ({
   // AI Automated Extraction Trigger
   const handleRunAiExtraction = async () => {
     setIsAiRunning(true);
-    setStatusMessage('Querying Gemini 2.5 Spatial Extraction API for parcel footprint...');
+    setStatusMessage('Querying Gemini 2.5 Spatial Extraction API for complex parcel footprint...');
     try {
       const footprint = await cadastreService.extractFootprintWithAi({
         surveyNumber,
         locality: address,
-        promptText: `Extract building footprint polygon, storey count, height, and unit division for survey parcel ${surveyNumber}`,
+        imageBase64: blueprintBase64 || undefined,
+        promptText: `Extract building footprint complex polygon, courtyard holes, storey count, height, and unit division for survey parcel ${surveyNumber}`,
       });
 
       if (footprint) {
@@ -161,9 +211,22 @@ export const ModelIngestionModal: React.FC<ModelIngestionModalProps> = ({
         if (footprint.hasBasement !== undefined) setHasSubsurface(footprint.hasBasement);
         if (footprint.basementDepth) setBasementDepth(footprint.basementDepth);
 
+        if (footprint.outerPolygon && Array.isArray(footprint.outerPolygon) && footprint.outerPolygon.length >= 4) {
+          setFootprintPolygon(footprint.outerPolygon);
+        }
+        if (footprint.courtyardHoles && Array.isArray(footprint.courtyardHoles)) {
+          setCourtyardHoles(footprint.courtyardHoles);
+        }
+        if (footprint.shapeArchetype) {
+          setShapeArchetype(footprint.shapeArchetype);
+        }
+        if (footprint.wings && Array.isArray(footprint.wings)) {
+          setWingPartitions(footprint.wings);
+        }
+
         setAiExtractionResult(footprint);
         setStatusMessage(
-          `AI extraction complete: ${footprint.footprintWidth}m × ${footprint.footprintLength}m, ${footprint.estimatedFloors} storeys (Confidence: ${Math.round((footprint.confidenceScore || 0.95) * 100)}%)`
+          `AI extraction complete: ${footprint.shapeArchetype || 'Complex'} footprint (${footprint.footprintWidth}m × ${footprint.footprintLength}m), ${footprint.estimatedFloors} storeys (Confidence: ${Math.round((footprint.confidenceScore || 0.95) * 100)}%)`
         );
       }
     } catch (err: any) {
@@ -174,12 +237,38 @@ export const ModelIngestionModal: React.FC<ModelIngestionModalProps> = ({
     }
   };
 
-  // Blueprint file change handler
-  const handleBlueprintUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  // Blueprint file change handler with automatic Computer Vision contour vectorization
+  const handleBlueprintUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
       const file = e.target.files[0];
       setBlueprintFile(file);
       setBlueprintPreviewUrl(URL.createObjectURL(file));
+
+      // Read as Base64 for AI Multimodal Vision
+      const reader = new FileReader();
+      reader.onload = async () => {
+        const base64 = reader.result as string;
+        setBlueprintBase64(base64);
+
+        // Run client-side computer vision contour tracing
+        setIsTracingContour(true);
+        setStatusMessage('Scanning 2D architectural blueprint contours & wall boundaries...');
+        try {
+          const cvResult = await traceBlueprintContour(file, buildingWidth || 24, buildingLength || 22);
+          if (cvResult && cvResult.outerPolygon && cvResult.outerPolygon.length >= 4) {
+            setFootprintPolygon(cvResult.outerPolygon);
+            setCourtyardHoles(cvResult.courtyardHoles || []);
+            setShapeArchetype(cvResult.detectedArchetype);
+            setWingPartitions(cvResult.wings || []);
+            setStatusMessage(`Extracted complex 2D contour: ${cvResult.outerPolygon.length} boundary vertices, ${cvResult.courtyardHoles.length} courtyard void(s).`);
+          }
+        } catch (err) {
+          console.warn('Client-side contour tracing warning:', err);
+        } finally {
+          setIsTracingContour(false);
+        }
+      };
+      reader.readAsDataURL(file);
     }
   };
 
@@ -300,14 +389,8 @@ export const ModelIngestionModal: React.FC<ModelIngestionModalProps> = ({
     try {
       const scene = new THREE.Scene();
 
-      const shape = new THREE.Shape();
-      const halfW = buildingWidth / 2;
-      const halfL = buildingLength / 2;
-      shape.moveTo(-halfW, -halfL);
-      shape.lineTo(halfW, -halfL);
-      shape.lineTo(halfW, halfL);
-      shape.lineTo(-halfW, halfL);
-      shape.closePath();
+      // Extrude true non-convex architectural polygon with inner courtyard holes
+      const shape = createThreeShapeFromPolygon(footprintPolygon, courtyardHoles);
 
       const extrudeSettings = {
         steps: totalFloors,
@@ -403,6 +486,15 @@ export const ModelIngestionModal: React.FC<ModelIngestionModalProps> = ({
         basementDepth: hasSubsurface ? basementDepth : 0,
         blueprintImageFile: blueprintFile,
         blueprintImageUrl: blueprintPreviewUrl || undefined,
+        blueprintImageBase64: blueprintBase64 || undefined,
+        footprintPolygon,
+        courtyardHoles,
+        shapeArchetype,
+        wingPolygons: wingPartitions ? wingPartitions.map((w) => ({
+          wing_id: (w as any).wing_id || (w as any).wingId || 'WING-1',
+          name: w.name,
+          polygon: w.polygon,
+        })) : undefined,
         modelFile,
         modelFileName: modelFile?.name,
         subMeshStrategy,
@@ -790,6 +882,100 @@ export const ModelIngestionModal: React.FC<ModelIngestionModalProps> = ({
                       </label>
                     </div>
 
+                    {/* Architectural Archetype Presets & Shape Selector (SIH Complex Floor Plans) */}
+                    <div className="bg-white border border-slate-200 rounded-xl p-3 space-y-2.5">
+                      <div className="flex items-center justify-between">
+                        <div className="font-bold text-slate-800 text-xs flex items-center gap-1.5">
+                          <Layers className="w-3.5 h-3.5 text-[#1e3a8a]" />
+                          <span>Architectural Geometry Archetype</span>
+                        </div>
+                        <span className="text-[10px] text-blue-700 bg-blue-50 px-2 py-0.5 rounded font-mono font-semibold">
+                          {footprintPolygon.length} Vertices &bull; {courtyardHoles.length > 0 ? 'Open Courtyard Void' : 'Solid Plate'}
+                        </span>
+                      </div>
+
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                        <button
+                          type="button"
+                          onClick={() => handleApplyArchetype('tri_radial_y')}
+                          className={`p-2 rounded-lg border text-left flex flex-col gap-1 transition-all cursor-pointer ${
+                            shapeArchetype === 'tri_radial_y'
+                              ? 'bg-blue-50/90 border-[#1e3a8a] text-[#1e3a8a] ring-1 ring-[#1e3a8a]'
+                              : 'bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100'
+                          }`}
+                        >
+                          <div className="font-bold text-[11px] flex items-center justify-between">
+                            <span>🌀 Tri-Radial Y-Wing</span>
+                            {shapeArchetype === 'tri_radial_y' && <Check className="w-3 h-3 text-[#1e3a8a]" />}
+                          </div>
+                          <div className="text-[9px] text-slate-500 leading-tight">
+                            Curved 3 wings + atrium (Plan 1)
+                          </div>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => handleApplyArchetype('cruciform_x')}
+                          className={`p-2 rounded-lg border text-left flex flex-col gap-1 transition-all cursor-pointer ${
+                            shapeArchetype === 'cruciform_x'
+                              ? 'bg-blue-50/90 border-[#1e3a8a] text-[#1e3a8a] ring-1 ring-[#1e3a8a]'
+                              : 'bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100'
+                          }`}
+                        >
+                          <div className="font-bold text-[11px] flex items-center justify-between">
+                            <span>➕ Cruciform 4-Wing</span>
+                            {shapeArchetype === 'cruciform_x' && <Check className="w-3 h-3 text-[#1e3a8a]" />}
+                          </div>
+                          <div className="text-[9px] text-slate-500 leading-tight">
+                            45° diagonal wings + core (Plan 2)
+                          </div>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => handleApplyArchetype('h_shape')}
+                          className={`p-2 rounded-lg border text-left flex flex-col gap-1 transition-all cursor-pointer ${
+                            shapeArchetype === 'h_shape'
+                              ? 'bg-blue-50/90 border-[#1e3a8a] text-[#1e3a8a] ring-1 ring-[#1e3a8a]'
+                              : 'bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100'
+                          }`}
+                        >
+                          <div className="font-bold text-[11px] flex items-center justify-between">
+                            <span>🏢 H-Shape Courtyard</span>
+                            {shapeArchetype === 'h_shape' && <Check className="w-3 h-3 text-[#1e3a8a]" />}
+                          </div>
+                          <div className="text-[9px] text-slate-500 leading-tight">
+                            Dual lightwell recesses (Plan 3)
+                          </div>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => handleApplyArchetype('box_rectangular')}
+                          className={`p-2 rounded-lg border text-left flex flex-col gap-1 transition-all cursor-pointer ${
+                            shapeArchetype === 'box_rectangular'
+                              ? 'bg-blue-50/90 border-[#1e3a8a] text-[#1e3a8a] ring-1 ring-[#1e3a8a]'
+                              : 'bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100'
+                          }`}
+                        >
+                          <div className="font-bold text-[11px] flex items-center justify-between">
+                            <span>🔲 Standard Box</span>
+                            {shapeArchetype === 'box_rectangular' && <Check className="w-3 h-3 text-[#1e3a8a]" />}
+                          </div>
+                          <div className="text-[9px] text-slate-500 leading-tight">
+                            Basic rectangular footprint
+                          </div>
+                        </button>
+                      </div>
+
+                      {isTracingContour && (
+                        <div className="text-[10px] text-blue-700 bg-blue-50 p-2 rounded flex items-center gap-1.5 font-mono animate-pulse">
+                          <div className="w-2.5 h-2.5 border-2 border-blue-600 border-t-transparent rounded-full animate-spin" />
+                          <span>Computer vision vectorizing blueprint wall boundaries...</span>
+                        </div>
+                      )}
+                    </div>
+
                     {/* Gemini AI Spatial Footprint & Floor Extraction (Module 4) */}
                     <div className="bg-blue-50/70 border border-blue-200 rounded-xl p-3 flex items-center justify-between">
                       <div className="space-y-0.5">
@@ -825,7 +1011,7 @@ export const ModelIngestionModal: React.FC<ModelIngestionModalProps> = ({
                       <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-2.5 text-emerald-800 text-[11px] flex items-center justify-between">
                         <span className="flex items-center gap-1.5 font-medium">
                           <CheckCircle2 className="w-4 h-4 text-emerald-600" />
-                          AI Footprint: {buildingWidth}m × {buildingLength}m &bull; {totalFloors} Storeys &bull; {unitsPerFloor} Flats/Floor
+                          AI Footprint: {footprintPolygon.length}-Point Complex Boundary &bull; {totalFloors} Storeys &bull; {unitsPerFloor} Units/Floor
                         </span>
                         <span className="font-mono text-[10px] bg-emerald-200/60 px-1.5 py-0.5 rounded font-bold">
                           95% Confidence
@@ -1403,6 +1589,9 @@ export const ModelIngestionModal: React.FC<ModelIngestionModalProps> = ({
                     blueprintPreviewUrl={blueprintPreviewUrl}
                     modelFile={modelFile}
                     surveyNumber={surveyNumber}
+                    footprintPolygon={footprintPolygon}
+                    courtyardHoles={courtyardHoles}
+                    shapeArchetype={shapeArchetype}
                   />
                 </ErrorBoundary>
               </div>
