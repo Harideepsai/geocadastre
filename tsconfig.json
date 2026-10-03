@@ -16,11 +16,21 @@
     "allowJs": true,
     "jsx": "react-jsx",
     "paths": {
-      "@/*": [
-        "./*"
-      ]
+      "@/*": ["./*"],
+      "@frontend/*": ["./frontend/*"],
+      "@backend/*": ["./backend/*"],
+      "@database/*": ["./database/*"],
+      "@app/*": ["./frontend/app/*"],
+      "@components/*": ["./frontend/components/*"],
+      "@lib/*": ["./frontend/lib/*"]
     },
     "allowImportingTsExtensions": true,
     "noEmit": true
-  }
+  },
+  "include": [
+    "frontend/**/*",
+    "backend/**/*",
+    "database/**/*",
+    "vite.config.ts"
+  ]
 }

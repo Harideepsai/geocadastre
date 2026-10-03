@@ -6,3 +6,9 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# Backend temporary files
+backend/temp/*
+!backend/temp/.gitkeep
+backend/python/__pycache__/
+*.pyc
